@@ -5,7 +5,7 @@ import yfinance as yf
 import pandas as pd
 from datetime import datetime
 
-# Token Bot Telegram dan Chat ID kamu (sudah otomatis terisi)
+# Token Bot Telegram dan Chat ID (Sudah otomatis terisi)
 TELEGRAM_TOKEN = "8742883928:AAHMB4INt3kndUqGXGql6z4k7Wk5Gw_uAFc"
 CHAT_ID = "8626570783"
 
