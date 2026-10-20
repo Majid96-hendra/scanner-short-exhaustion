@@ -1,10 +1,12 @@
-name: Telegram Trigger Scanner
+name: Auto Scan RSI 15 Min
 
 on:
+  schedule:
+    - cron: '*/15 * * * *' # Berjalan otomatis tiap 15 menit
   workflow_dispatch:
 
 jobs:
-  run-scanner:
+  run-rsi-scanner:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -20,8 +22,5 @@ jobs:
           pip install ccxt yfinance pandas requests
 
       - name: Run Scanner Script
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
         run: |
           python scanner.py
