@@ -42,17 +42,26 @@ GRID = {
 # ---------------------------------------------------------------- data
 def fetch():
     syms = common.universe(TOP_N)
-    data = {}
+    data, lens, errs = {}, [], []
     for s in syms:
         try:
-            cs = common.candles(s, "1D", 1000)
+            cs, err = common.candles_history(s, "1D", 1000)
+            if err:
+                errs.append(err)
             data[s] = [[c["t"], c["o"], c["h"], c["l"], c["c"], c["v"]] for c in cs]
+            lens.append(len(cs))
         except RuntimeError as e:
+            errs.append(str(e))
             print("lewati", s, e)
         time.sleep(0.12)
     with open(DATA_FILE, "w") as f:
         json.dump({"symbols": list(data), "candles": data}, f)
-    print(f"Data tersimpan: {len(data)} pair")
+    lens.sort()
+    if lens:
+        print(f"Data tersimpan: {len(data)} pair | hari per pair: "
+              f"min {lens[0]}, median {lens[len(lens) // 2]}, maks {lens[-1]}")
+    if errs:
+        print("Pesan error pertama:", errs[0])
 
 
 def load():
@@ -111,7 +120,11 @@ def line(tag, s):
 def run(candles):
     inds = {s: Ind(d) for s, d in candles.items() if len(d) > 260}
     if len(inds) < 5:
-        raise SystemExit("Data terlalu sedikit (butuh minimal 5 pair dengan >260 hari).")
+        lens = sorted(len(d) for d in candles.values())
+        raise SystemExit(
+            "Data terlalu sedikit (butuh minimal 5 pair dengan >260 hari). "
+            f"Pair: {len(lens)}, hari terbanyak: {lens[-1] if lens else 0}. "
+            "Lihat 'Pesan error pertama' di log fetch.")
     rank = {s: i for i, s in enumerate(inds)}
     t0 = min(i.d[205]["t"] for i in inds.values())
     t1 = max(i.d[-1]["t"] for i in inds.values())
