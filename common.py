@@ -127,6 +127,12 @@ def send(text, parse_mode="HTML"):
     payload = {"chat_id": chat, "text": text, "disable_web_page_preview": True}
     if parse_mode:
         payload["parse_mode"] = parse_mode
-    r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                      json=payload, timeout=20)
-    r.raise_for_status()
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                          json=payload, timeout=20)
+        r.raise_for_status()
+    except requests.RequestException as e:
+        code = getattr(getattr(e, "response", None), "status_code", "?")
+        print(f"⚠️ Gagal kirim ke Telegram (HTTP {code}). "
+              "Cek isi secret TELEGRAM_TOKEN dan TELEGRAM_CHAT_ID. Isi pesan:")
+        print(text)
