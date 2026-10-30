@@ -37,8 +37,20 @@ def get(path, **params):
     raise RuntimeError(f"Gagal request {path}: {last}")
 
 
+def _parse(raw, period):
+    """Format Bitget: [ts,o,h,l,c,volBase,volQuote]. Hanya candle yang sudah close."""
+    now = int(time.time() * 1000)
+    out = {}
+    for k in raw:
+        t = int(k[0])
+        if t + period <= now:
+            out[t] = {"t": t, "o": float(k[1]), "h": float(k[2]),
+                      "l": float(k[3]), "c": float(k[4]), "v": float(k[6])}
+    return out
+
+
 def candles(symbol, gran="1D", limit=400):
-    """Candle yang SUDAH close, urut lama -> baru. Format Bitget: [ts,o,h,l,c,volBase,volQuote]."""
+    """Candle yang SUDAH close, urut lama -> baru."""
     try:
         raw = get(f"{MIX}/candles", symbol=symbol, productType=PRODUCT,
                   granularity=gran, limit=limit)
@@ -47,14 +59,30 @@ def candles(symbol, gran="1D", limit=400):
             raise
         raw = get(f"{MIX}/candles", symbol=symbol, productType=PRODUCT,
                   granularity=gran, limit=200)
-    now = int(time.time() * 1000)
+    got = _parse(raw, PERIOD_MS[gran])
+    return [got[t] for t in sorted(got)]
+
+
+def candles_history(symbol, gran="1D", total=1000):
+    """Riwayat panjang: ambil terbaru, lalu mundur bertahap lewat history-candles.
+    Return (candle, pesan_error_atau_None)."""
     period = PERIOD_MS[gran]
-    rows = sorted(raw, key=lambda k: int(k[0]))
-    return [
-        {"t": int(k[0]), "o": float(k[1]), "h": float(k[2]),
-         "l": float(k[3]), "c": float(k[4]), "v": float(k[6])}
-        for k in rows if int(k[0]) + period <= now
-    ]
+    got = {c["t"]: c for c in candles(symbol, gran, 1000)}
+    err = None
+    while len(got) < total:
+        end = (min(got) - 1) if got else int(time.time() * 1000)
+        try:
+            raw = get(f"{MIX}/history-candles", symbol=symbol, productType=PRODUCT,
+                      granularity=gran, endTime=end, limit=200)
+        except RuntimeError as e:
+            err = str(e)
+            break
+        new = _parse(raw or [], period)
+        if not [t for t in new if t not in got]:
+            break
+        got.update(new)
+        time.sleep(0.1)
+    return [got[t] for t in sorted(got)], err
 
 
 def universe(top_n):
