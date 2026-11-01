@@ -75,11 +75,16 @@ def message(s, p, verified):
     long_ = s["side"] == "LONG"
     entry = s["entry"]
     stars = "⭐" * round(s["score"] / 2)
+    if p["mode"] == "cross":
+        entry_txt = (f"EMA{p['ema_fast']}/{p['ema_n']} cross "
+                     f"{'naik' if long_ else 'turun'} baru")
+    else:
+        entry_txt = f"{'Breakout' if long_ else 'Breakdown'} {p['entry_n']} hari"
     t_close = datetime.fromtimestamp(s["t_close"] / 1000, WIB).strftime("%d-%m %H:%M WIB")
     lines = [
         f"{'🟢' if long_ else '🔴'} <b>{s['side']} • {s['symbol']}</b>",
         "━━━━━━━━━━━━━━",
-        f"⏱ Swing harian • {'Breakout' if long_ else 'Breakdown'} {p['entry_n']} hari",
+        f"⏱ Swing harian • {entry_txt}",
         f"📈 Tren {p['trend_lb']} hari: {'Naik' if long_ else 'Turun'} ({s['chg']:+.0f}%) ✅",
         f"{stars} Skor: <b>{s['score']}/10</b>",
         "",
@@ -88,11 +93,17 @@ def message(s, p, verified):
     ]
     if s["tp1"]:
         pct = abs(s["tp1"] / entry - 1) * 100
-        lines.append(f"🎯 <b>TP1</b>      : <code>{fmt(s['tp1'])}</code> "
-                     f"({int(p['tp_frac'] * 100)}%) +{pct:.1f}% → lalu SL ke entry")
+        if s.get("tp_full"):
+            lines.append(f"🎯 <b>TP</b>       : <code>{fmt(s['tp1'])}</code> "
+                         f"(+{pct:.0f}%) → tutup semua")
+        else:
+            lines.append(f"🎯 <b>TP1</b>      : <code>{fmt(s['tp1'])}</code> "
+                         f"({int(p['tp_frac'] * 100)}%) +{pct:.1f}% → lalu SL ke entry")
+    tail = "Sebelum TP kena, SL tetap boleh naik." if s.get("tp_full") else \
+        "Tanpa TP tetap: biarkan tren berjalan."
     lines.append(f"🔔 <b>Trailing</b> : setelah candle harian close, SL ikuti "
                  f"{'low' if long_ else 'high'} {p['exit_n']} hari bila lebih ketat "
-                 f"(kini <code>{fmt(s['trail'])}</code>). Tanpa TP tetap: biarkan tren berjalan.")
+                 f"(kini <code>{fmt(s['trail'])}</code>). {tail}")
     lines += ["", f"⚖️ Risiko maks 1% modal • ukuran = 1% ÷ {s['sl_pct']:.1f}%",
               f"💸 Biaya fee+slippage ≈ {s['cost_r']:.2f}R"]
     b = s["book"]
@@ -117,7 +128,12 @@ def message(s, p, verified):
 
 def report(n_pairs, stats, found, p):
     ups = [s for s in stats if s["up"]]
-    near = sorted((s for s in ups if 0 < s["to_high"] <= 5), key=lambda s: s["to_high"])[:3]
+    cross = p["mode"] == "cross"
+    if cross:
+        near = sorted((s for s in stats if 0 < s["gap"] <= 3 and s["approach"]),
+                      key=lambda s: s["gap"])[:3]
+    else:
+        near = sorted((s for s in ups if 0 < s["to_high"] <= 5), key=lambda s: s["to_high"])[:3]
     t_close = datetime.fromtimestamp(max(s["t_close"] for s in stats) / 1000, WIB)
     lines = ["😴 <b>Laporan harian swing</b>: tidak ada sinyal", "━━━━━━━━━━━━━━",
              f"Pair dipindai: {len(stats)} dari {n_pairs}",
@@ -127,10 +143,14 @@ def report(n_pairs, stats, found, p):
     if found:
         lines.append(f"Sinyal muncul tapi skor di bawah batas: {len(found)}")
     if near:
-        lines.append(f"Hampir breakout (jarak ke high {p['entry_n']} hari):")
-        lines += [f"• {s['symbol']}  +{s['to_high']:.1f}%" for s in near]
+        if cross:
+            lines.append(f"Hampir cross (EMA{p['ema_fast']} tinggal sedikit di bawah EMA{p['ema_n']}):")
+            lines += [f"• {s['symbol']}  celah {s['gap']:.1f}%" for s in near]
+        else:
+            lines.append(f"Hampir breakout (jarak ke high {p['entry_n']} hari):")
+            lines += [f"• {s['symbol']}  +{s['to_high']:.1f}%" for s in near]
     else:
-        lines.append("Belum ada yang dekat breakout.")
+        lines.append("Belum ada yang dekat cross." if cross else "Belum ada yang dekat breakout.")
     if len(ups) <= 2:
         lines.append("Pasar belum searah tren naik, wajar sepi. Jangan paksa entry.")
     lines += ["━━━━━━━━━━━━━━", f"🕐 Data s/d candle close {t_close:%d-%m %H:%M} WIB",
