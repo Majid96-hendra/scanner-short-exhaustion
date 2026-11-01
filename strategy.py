@@ -139,6 +139,25 @@ def live_signal(d, p):
     }
 
 
+def status(d, p):
+    """Ringkasan kondisi hari ini (untuk laporan harian): lolos filter tren? seberapa dekat ke breakout?"""
+    if len(d) < warmup(p) + 1:
+        return None
+    ind = Ind(d)
+    a = ind.arrays(p)
+    i = len(d) - 1
+    if any(x is None for x in (a["ema_s"][i], a["ema_f"][i], a["hh"][i], a["ll"][i])):
+        return None
+    c = ind.c[i]
+    chg = c / ind.c[i - p["trend_lb"]] - 1
+    return {
+        "up": c > a["ema_s"][i] and a["ema_f"][i] > a["ema_s"][i] and chg > 0,
+        "dn": c < a["ema_s"][i] and a["ema_f"][i] < a["ema_s"][i] and chg < 0,
+        "to_high": (a["hh"][i] / c - 1) * 100,   # >0: masih di bawah level breakout
+        "t_close": d[i]["t"] + DAY_MS,
+    }
+
+
 # ------------------------------------------------------------------ simulator
 def simulate(ind, a, p, sym=""):
     """Simulasi satu simbol. Entry di OPEN hari berikutnya (tanpa lookahead). Hasil dalam R."""
