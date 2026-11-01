@@ -2,30 +2,31 @@
   "params": {
     "entry_n": 20,
     "exit_n": 20,
-    "ema_n": 200,
+    "ema_n": 100,
     "ema_fast": 50,
     "trend_lb": 90,
     "atr_n": 14,
     "atr_stop": 2.0,
     "max_sl": 0.15,
-    "shorts": true,
+    "shorts": false,
     "tp_r": 0.0,
     "tp_frac": 0.5,
-    "mode": "cross",
+    "mode": "breakout",
     "cross_n": 20,
     "tp_pct": 0.3
   },
   "verified": false,
+  "stable": true,
   "updated": "2026-11-01",
   "oos": {
-    "n": 14,
-    "win": 35.714,
-    "avg": 0.246,
-    "pf": 1.515,
-    "tot": 3.44,
-    "mdd": 3.692,
-    "per_day": 0.053,
-    "sl": 10.982,
-    "cost": 0.076
+    "n": 33,
+    "win": 30.303,
+    "avg": 0.111,
+    "pf": 1.188,
+    "tot": 3.66,
+    "mdd": 10.596,
+    "per_day": 0.125,
+    "sl": 11.342,
+    "cost": 0.052
   }
 }
