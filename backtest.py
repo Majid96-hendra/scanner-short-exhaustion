@@ -25,7 +25,7 @@ import strategy
 from strategy import DEFAULT, Ind, simulate
 
 DATA_FILE = os.getenv("DATA_FILE", "data.json")
-TOP_N = int(os.getenv("TOP_N", "60"))
+TOP_N = int(os.getenv("BT_TOP_N", "100"))  # makin banyak pair = makin banyak trade untuk diuji
 MAX_POS = int(os.getenv("MAX_POS", "2"))
 IS_FRAC = 0.7
 MIN_TRADES = 30
@@ -154,6 +154,7 @@ def run(candles):
     d_is = (split - t0) / strategy.DAY_MS
     d_oos = (t1 - split) / strategy.DAY_MS
 
+    mid = t0 + (split - t0) / 2
     keys, results = list(GRID), []
     for entry, tp, vals in product(ENTRIES, TPS, product(*GRID.values())):
         p = {**DEFAULT, **entry, **tp, **dict(zip(keys, vals))}
@@ -163,16 +164,26 @@ def run(candles):
         acc = portfolio(raw, rank)
         results.append({
             "p": p,
+            "A": stats([t for t in acc if t["t_entry"] < mid], d_is / 2),
+            "B": stats([t for t in acc if mid <= t["t_entry"] < split], d_is / 2),
             "IS": stats([t for t in acc if t["t_entry"] < split], d_is),
             "OOS": stats([t for t in acc if t["t_entry"] >= split], d_oos),
             "raw_day": len(raw) / max(d_is + d_oos, 1),
         })
 
-    pool = [r for r in results if r["IS"]["n"] >= MIN_TRADES] or results
-    pool.sort(key=lambda r: r["IS"]["avg"] * math.sqrt(max(r["IS"]["n"], 1)), reverse=True)
+    key = lambda r: r["IS"]["avg"] * math.sqrt(max(r["IS"]["n"], 1))
+    ranked = sorted([r for r in results if r["IS"]["n"] >= MIN_TRADES] or results,
+                    key=key, reverse=True)
+    # utamakan yang untung di KEDUA paruh data awal (lebih tahan banting daripada kebetulan)
+    stable = [r for r in ranked if r["A"]["avg"] > 0 and r["B"]["avg"] > 0
+              and r["A"]["n"] >= 8 and r["B"]["n"] >= 8]
+    pool = stable or ranked
     best = pool[0]
     oos = best["OOS"]
     verified = oos["n"] >= 15 and oos["avg"] >= 0.1 and oos["pf"] >= 1.2
+    A, B = best["A"], best["B"]
+    stab_line = (f"Stabilitas data awal: paruh 1 {A['avg']:+.2f}R ({A['n']}) • "
+                 f"paruh 2 {B['avg']:+.2f}R ({B['n']}) " + ("✅" if stable else "⚠️ tidak stabil"))
 
     fmt_d = lambda ms: datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%d")
     rep = [
@@ -184,6 +195,7 @@ def run(candles):
         "PARAMETER TERPILIH (dipilih dari 70% data awal):",
         describe(best["p"]),
         line("In-sample ", best["IS"]),
+        stab_line,
         line("Out-of-sample", oos),
         "",
         f"Sinyal/hari: mentah {best['raw_day']:.2f} • setelah batas posisi "
@@ -195,11 +207,14 @@ def run(candles):
     if verified:
         rep.append("✅ LOLOS uji out-of-sample (OOS rata-rata ≥ +0,1R dan PF ≥ 1,2). "
                    "Bukan jaminan. Mulai dengan ukuran kecil.")
+    elif oos["n"] < 15 and oos["avg"] > 0:
+        rep.append("⚠️ DATA UJI TERLALU SEDIKIT (kurang dari 15 trade). Hasilnya positif tapi "
+                   "belum bisa dipercaya. Uji maju dengan ukuran sangat kecil.")
     else:
         rep.append("❌ BELUM LOLOS uji out-of-sample. Jangan live dengan uang besar. "
                    "Hasil bagus di data lama bisa kebetulan.")
     def best_of(test):
-        c = [r for r in pool if test(r["p"])]
+        c = [r for r in ranked if test(r["p"])]
         return c[0] if c else None
 
     rep += ["", "PERBANDINGAN MODE ENTRY (terbaik tiap mode, IS -> OOS):"]
@@ -227,7 +242,7 @@ def run(candles):
         f.write(text)
     with open("params.json", "w") as f:
         json.dump({
-            "params": best["p"], "verified": verified,
+            "params": best["p"], "verified": verified, "stable": bool(stable),
             "updated": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             "oos": {k: round(v, 3) for k, v in oos.items()},
         }, f, indent=2)
