@@ -16,7 +16,7 @@ import strategy
 TOP_N = int(os.getenv("TOP_N", "60"))
 MIN_SCORE = int(os.getenv("MIN_SCORE", "5"))
 MAX_SIGNALS = int(os.getenv("MAX_SIGNALS", "3"))
-SEND_EMPTY = os.getenv("SEND_EMPTY", "0") == "1"
+DAILY_REPORT = os.getenv("DAILY_REPORT", "1") == "1"  # laporan harian saat tidak ada sinyal
 WIB = timezone(timedelta(hours=7))
 
 
@@ -114,6 +114,29 @@ def message(s, p, verified):
     return "\n".join(lines)
 
 
+def report(n_pairs, stats, found, p):
+    ups = [s for s in stats if s["up"]]
+    near = sorted((s for s in ups if 0 < s["to_high"] <= 5), key=lambda s: s["to_high"])[:3]
+    t_close = datetime.fromtimestamp(max(s["t_close"] for s in stats) / 1000, WIB)
+    lines = ["😴 <b>Laporan harian swing</b>: tidak ada sinyal", "━━━━━━━━━━━━━━",
+             f"Pair dipindai: {len(stats)} dari {n_pairs}",
+             f"Lolos filter tren naik: {len(ups)}"]
+    if p["shorts"]:
+        lines.append(f"Lolos filter tren turun: {sum(1 for s in stats if s['dn'])}")
+    if found:
+        lines.append(f"Sinyal muncul tapi skor di bawah batas: {len(found)}")
+    if near:
+        lines.append(f"Hampir breakout (jarak ke high {p['entry_n']} hari):")
+        lines += [f"• {s['symbol']}  +{s['to_high']:.1f}%" for s in near]
+    else:
+        lines.append("Belum ada yang dekat breakout.")
+    if len(ups) <= 2:
+        lines.append("Pasar belum searah tren naik, wajar sepi. Jangan paksa entry.")
+    lines += ["━━━━━━━━━━━━━━", f"🕐 Data s/d candle close {t_close:%d-%m %H:%M} WIB",
+              "<i>Bot hidup ✅</i>"]
+    return "\n".join(lines)
+
+
 def main():
     p, verified = load_params()
     try:
@@ -122,13 +145,18 @@ def main():
         common.send(f"⚠️ Scanner gagal: {e}")
         sys.exit(1)
 
-    found, errors = [], 0
+    found, stats, errors = [], [], 0
     for sym in symbols:
         try:
-            sig = strategy.live_signal(common.candles(sym, "1D", 400), p)
+            d = common.candles(sym, "1D", 400)
+            sig = strategy.live_signal(d, p)
             if sig:
                 sig["symbol"] = sym
                 found.append(sig)
+            st = strategy.status(d, p)
+            if st:
+                st["symbol"] = sym
+                stats.append(st)
         except RuntimeError:
             errors += 1
         time.sleep(0.12)
@@ -140,8 +168,12 @@ def main():
 
     for s in good:
         common.send(message(s, p, verified))
-    if not good and SEND_EMPTY:
-        common.send("😴 Tidak ada sinyal swing hari ini. Sabar, jangan paksa entry.")
+    if not good and DAILY_REPORT:
+        if stats:
+            common.send(report(len(symbols), stats, found, p))
+        else:
+            common.send("⚠️ Scanner jalan tapi data candle gagal diambil untuk semua pair. "
+                        "Cek log di tab Actions.")
 
 
 if __name__ == "__main__":
