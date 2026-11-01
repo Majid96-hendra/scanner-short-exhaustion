@@ -4,6 +4,7 @@ Scanner SWING harian (Bitget USDT-M Futures) -> Telegram.
 Strategi dan parameter sama dengan backtest (params.json hasil backtest dipakai otomatis).
 Jalankan sekali sehari, setelah candle harian close.
 """
+import html
 import json
 import os
 import sys
@@ -145,10 +146,14 @@ def main():
         common.send(f"⚠️ Scanner gagal: {e}")
         sys.exit(1)
 
-    found, stats, errors = [], [], 0
+    need = strategy.warmup(p) + 5
+    found, stats, lens, errors, first_err = [], [], [], 0, ""
     for sym in symbols:
         try:
-            d = common.candles(sym, "1D", 400)
+            d, herr = common.candles_history(sym, "1D", need + 30)
+            lens.append(len(d))
+            if not d and herr:
+                raise RuntimeError(herr)
             sig = strategy.live_signal(d, p)
             if sig:
                 sig["symbol"] = sym
@@ -157,8 +162,9 @@ def main():
             if st:
                 st["symbol"] = sym
                 stats.append(st)
-        except RuntimeError:
+        except RuntimeError as e:
             errors += 1
+            first_err = first_err or str(e)
         time.sleep(0.12)
 
     scored = [enrich(s) for s in found]
@@ -172,8 +178,12 @@ def main():
         if stats:
             common.send(report(len(symbols), stats, found, p))
         else:
-            common.send("⚠️ Scanner jalan tapi data candle gagal diambil untuk semua pair. "
-                        "Cek log di tab Actions.")
+            short = sum(1 for n in lens if n < need)
+            common.send(
+                "⚠️ Scanner jalan tapi data tidak bisa dipakai.\n"
+                f"Gagal diambil: {errors} pair • riwayat terlalu pendek: {short} pair\n"
+                f"Riwayat terpanjang: {max(lens) if lens else 0} hari (butuh {need})\n"
+                f"Error pertama: {html.escape(first_err) or '-'}")
 
 
 if __name__ == "__main__":
