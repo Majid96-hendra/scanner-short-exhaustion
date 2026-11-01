@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 import common
 import strategy
 
-TOP_N = int(os.getenv("TOP_N", "60"))
+TOP_N = int(os.getenv("TOP_N", "100"))
 MIN_SCORE = int(os.getenv("MIN_SCORE", "5"))
 MAX_SIGNALS = int(os.getenv("MAX_SIGNALS", "3"))
 DAILY_REPORT = os.getenv("DAILY_REPORT", "1") == "1"  # laporan harian saat tidak ada sinyal
