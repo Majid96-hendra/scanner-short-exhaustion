@@ -29,14 +29,31 @@ TOP_N = int(os.getenv("TOP_N", "60"))
 MAX_POS = int(os.getenv("MAX_POS", "2"))
 IS_FRAC = 0.7
 MIN_TRADES = 30
+ENTRIES = [
+    dict(mode="breakout", entry_n=20),
+    dict(mode="breakout", entry_n=55),
+    dict(mode="cross", entry_n=20),   # EMA cepat baru cross di atas EMA lambat
+]
+TPS = [
+    dict(tp_r=0.0, tp_pct=0.0),   # tanpa TP tetap (trailing)
+    dict(tp_r=3.0, tp_pct=0.0),   # TP parsial 3R
+    dict(tp_r=0.0, tp_pct=0.2),   # TP penuh +20% harga
+    dict(tp_r=0.0, tp_pct=0.3),   # TP penuh +30% harga
+]
 GRID = {
-    "entry_n": [20, 30, 55],
     "exit_n": [10, 20],
     "ema_n": [100, 200],
     "atr_stop": [2.0, 3.0],
     "shorts": [True, False],
-    "tp_r": [0.0, 3.0],
 }
+
+
+def tp_label(p):
+    if p["tp_pct"] > 0:
+        return f"TP penuh +{p['tp_pct'] * 100:.0f}%"
+    if p["tp_r"] > 0:
+        return f"TP parsial {p['tp_r']:g}R (50%)"
+    return "tanpa TP tetap (trailing)"
 
 
 # ---------------------------------------------------------------- data
@@ -105,9 +122,14 @@ def stats(tr, days):
 
 
 def describe(p):
-    tp = f"TP parsial {p['tp_r']:g}R (50%)" if p["tp_r"] > 0 else "tanpa TP tetap (trailing)"
-    return (f"Breakout {p['entry_n']} hari • trailing {p['exit_n']} hari • EMA{p['ema_n']} • "
-            f"SL {p['atr_stop']:g}xATR • short {'ya' if p['shorts'] else 'tidak'} • {tp}")
+    if p["mode"] == "cross":
+        entry = f"EMA{p['ema_fast']}/{p['ema_n']} cross baru (≤{p['cross_n']} hari)"
+        ema_txt = ""
+    else:
+        entry = f"Breakout {p['entry_n']} hari"
+        ema_txt = f" • EMA{p['ema_n']}"
+    return (f"{entry}{ema_txt} • trailing {p['exit_n']} hari • "
+            f"SL {p['atr_stop']:g}xATR • short {'ya' if p['shorts'] else 'tidak'} • {tp_label(p)}")
 
 
 def line(tag, s):
@@ -133,8 +155,8 @@ def run(candles):
     d_oos = (t1 - split) / strategy.DAY_MS
 
     keys, results = list(GRID), []
-    for vals in product(*GRID.values()):
-        p = {**DEFAULT, **dict(zip(keys, vals))}
+    for entry, tp, vals in product(ENTRIES, TPS, product(*GRID.values())):
+        p = {**DEFAULT, **entry, **tp, **dict(zip(keys, vals))}
         raw = []
         for s, ind in inds.items():
             raw += simulate(ind, ind.arrays(p), p, s)
@@ -176,8 +198,25 @@ def run(candles):
     else:
         rep.append("❌ BELUM LOLOS uji out-of-sample. Jangan live dengan uang besar. "
                    "Hasil bagus di data lama bisa kebetulan.")
-    rep += ["", "5 KANDIDAT TERATAS (in-sample -> out-of-sample):"]
-    for k, r in enumerate(pool[:5], 1):
+    def best_of(test):
+        c = [r for r in pool if test(r["p"])]
+        return c[0] if c else None
+
+    rep += ["", "PERBANDINGAN MODE ENTRY (terbaik tiap mode, IS -> OOS):"]
+    for label, test in (("Breakout", lambda p: p["mode"] == "breakout"),
+                        ("EMA cross", lambda p: p["mode"] == "cross")):
+        r = best_of(test)
+        if r:
+            rep.append(f"• {label}: {r['IS']['avg']:+.2f}R ({r['IS']['n']}) -> "
+                       f"{r['OOS']['avg']:+.2f}R ({r['OOS']['n']})")
+    rep += ["", "PERBANDINGAN TARGET PROFIT (terbaik tiap jenis, IS -> OOS):"]
+    for tp in TPS:
+        r = best_of(lambda p, tp=tp: p["tp_r"] == tp["tp_r"] and p["tp_pct"] == tp["tp_pct"])
+        if r:
+            rep.append(f"• {tp_label(r['p'])}: {r['IS']['avg']:+.2f}R ({r['IS']['n']}) -> "
+                       f"{r['OOS']['avg']:+.2f}R ({r['OOS']['n']})")
+    rep += ["", "3 KANDIDAT TERATAS (in-sample -> out-of-sample):"]
+    for k, r in enumerate(pool[:3], 1):
         rep.append(f"{k}. {describe(r['p'])}")
         rep.append(f"   IS {r['IS']['avg']:+.2f}R ({r['IS']['n']}) -> OOS {r['OOS']['avg']:+.2f}R ({r['OOS']['n']})")
     rep += ["", "⚠️ Memakai pair teratas HARI INI (bias survivor: koin yang mati tidak ikut).",
