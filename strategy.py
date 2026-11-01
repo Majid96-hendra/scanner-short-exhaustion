@@ -6,6 +6,8 @@ Entry (di close candle harian):
          + close > EMA(ema_n) + EMA(50) > EMA(ema_n) + perubahan 'trend_lb' hari > 0
   SHORT: kebalikannya (hanya jika shorts=True)
 SL awal : atr_stop x ATR dari entry.
+Mode "cross": LONG saat EMA(ema_fast) baru cross naik di atas EMA(ema_n) (maks cross_n hari lalu)
+          dan harga di atas kedua garis + perubahan trend_lb hari > 0 (SHORT kebalikannya).
 Keluar  : trailing stop = low (long) / high (short) 'exit_n' hari terakhir,
           dinaikkan hanya setelah candle close. Opsional TP parsial di tp_r kali R
           (lalu SL digeser ke entry).
@@ -15,6 +17,7 @@ Biaya   : fee taker 2 sisi + slippage 2 sisi + funding (long) dihitung dalam sat
 DEFAULT = dict(
     entry_n=20, exit_n=10, ema_n=200, ema_fast=50, trend_lb=90, atr_n=14,
     atr_stop=2.5, max_sl=0.15, shorts=True, tp_r=0.0, tp_frac=0.5,
+    mode="breakout", cross_n=20, tp_pct=0.0,
 )
 FEE = 0.0006       # fee taker per sisi (0,06%)
 SLIP = 0.0005      # slippage per sisi (0,05%)
@@ -63,6 +66,19 @@ def roll(vals, n, fn, prior):
     return out
 
 
+def last_cross(ef, es, up):
+    """Indeks cross terakhir (<= i) antara EMA cepat dan lambat; None bila belum ada."""
+    out, last = [None] * len(ef), None
+    for i in range(1, len(ef)):
+        if None not in (ef[i], es[i], ef[i - 1], es[i - 1]):
+            if up and ef[i - 1] <= es[i - 1] and ef[i] > es[i]:
+                last = i
+            elif not up and ef[i - 1] >= es[i - 1] and ef[i] < es[i]:
+                last = i
+        out[i] = last
+    return out
+
+
 class Ind:
     """Menyimpan (memoize) indikator per simbol supaya grid search cepat."""
 
@@ -79,14 +95,18 @@ class Ind:
         return self.m[key]
 
     def arrays(self, p):
+        ef = self.memo(("ema", p["ema_fast"]), lambda: ema(self.c, p["ema_fast"]))
+        es = self.memo(("ema", p["ema_n"]), lambda: ema(self.c, p["ema_n"]))
         return {
-            "ema_s": self.memo(("ema", p["ema_n"]), lambda: ema(self.c, p["ema_n"])),
-            "ema_f": self.memo(("ema", p["ema_fast"]), lambda: ema(self.c, p["ema_fast"])),
+            "ema_s": es,
+            "ema_f": ef,
             "atr": self.memo(("atr", p["atr_n"]), lambda: atr_series(self.d, p["atr_n"])),
             "hh": self.memo(("hh", p["entry_n"]), lambda: roll(self.h, p["entry_n"], max, True)),
             "ll": self.memo(("ll", p["entry_n"]), lambda: roll(self.l, p["entry_n"], min, True)),
             "xlow": self.memo(("xl", p["exit_n"]), lambda: roll(self.l, p["exit_n"], min, False)),
             "xhigh": self.memo(("xh", p["exit_n"]), lambda: roll(self.h, p["exit_n"], max, False)),
+            "lup": self.memo(("lup", p["ema_fast"], p["ema_n"]), lambda: last_cross(ef, es, True)),
+            "ldn": self.memo(("ldn", p["ema_fast"], p["ema_n"]), lambda: last_cross(ef, es, False)),
         }
 
 
@@ -95,8 +115,30 @@ def warmup(p):
 
 
 # ------------------------------------------------------------------ sinyal
+def cross_state(a, ind, i, p):
+    """Kondisi mode 'cross' pada hari i (bukan kejadian): LONG / SHORT / None."""
+    ef, es = a["ema_f"][i], a["ema_s"][i]
+    if ef is None or es is None or i - p["trend_lb"] < 0:
+        return None
+    c = ind.c[i]
+    chg = c / ind.c[i - p["trend_lb"]] - 1
+    lu, ld = a["lup"][i], a["ldn"][i]
+    if ef > es and c > ef and c > es and chg > 0 and lu is not None and i - lu < p["cross_n"]:
+        return "LONG"
+    if (p["shorts"] and ef < es and c < ef and c < es and chg < 0
+            and ld is not None and i - ld < p["cross_n"]):
+        return "SHORT"
+    return None
+
+
 def signal_at(a, ind, i, p):
     """Sinyal di close hari ke-i. Return 'LONG' / 'SHORT' / None."""
+    if p["mode"] == "cross":
+        if i < 1 or a["atr"][i] is None:
+            return None
+        side = cross_state(a, ind, i, p)
+        # sinyal hanya pada hari kondisi PERTAMA kali terpenuhi (bukan tiap hari)
+        return side if side and cross_state(a, ind, i - 1, p) != side else None
     need = (a["ema_s"][i], a["ema_f"][i], a["atr"][i], a["hh"][i], a["ll"][i])
     if any(x is None for x in need) or i - p["trend_lb"] < 0:
         return None
@@ -129,7 +171,9 @@ def live_signal(d, p):
     avg_vol = sum(x["v"] for x in d[i - 20:i]) / 20
     return {
         "side": side, "entry": entry, "sl": entry - sgn * risk, "sl_pct": sl_pct * 100,
-        "tp1": entry + sgn * p["tp_r"] * risk if p["tp_r"] > 0 else None,
+        "tp1": (entry * (1 + sgn * p["tp_pct"]) if p["tp_pct"] > 0
+                else entry + sgn * p["tp_r"] * risk if p["tp_r"] > 0 else None),
+        "tp_full": p["tp_pct"] > 0,
         "trail": a["xlow"][i] if side == "LONG" else a["xhigh"][i],
         "chg": (entry / ind.c[i - p["trend_lb"]] - 1) * 100,
         "dist200": (entry / a["ema_s"][i] - 1) * 100,
@@ -154,6 +198,9 @@ def status(d, p):
         "up": c > a["ema_s"][i] and a["ema_f"][i] > a["ema_s"][i] and chg > 0,
         "dn": c < a["ema_s"][i] and a["ema_f"][i] < a["ema_s"][i] and chg < 0,
         "to_high": (a["hh"][i] / c - 1) * 100,   # >0: masih di bawah level breakout
+        # >0: EMA cepat masih di bawah EMA lambat; 'approach' = harga sudah di atas EMA cepat
+        "gap": (a["ema_s"][i] / a["ema_f"][i] - 1) * 100,
+        "approach": c > a["ema_f"][i] and chg > 0,
         "t_close": d[i]["t"] + DAY_MS,
     }
 
@@ -179,12 +226,18 @@ def simulate(ind, a, p, sym=""):
             continue
         stop = entry - sgn * risk
         tp = entry + sgn * p["tp_r"] * risk if p["tp_r"] > 0 else None
+        tp_full = entry * (1 + sgn * p["tp_pct"]) if p["tp_pct"] > 0 else None
         parts, rem, j = [], 1.0, i + 1
         while j < n:
             day = d[j]
             if (sgn == 1 and day["l"] <= stop) or (sgn == -1 and day["h"] >= stop):
                 fill = min(day["o"], stop) if sgn == 1 else max(day["o"], stop)
                 parts.append((rem, fill * (1 - sgn * SLIP), j))
+                rem = 0.0
+                break
+            if tp_full is not None and ((sgn == 1 and day["h"] >= tp_full)
+                                        or (sgn == -1 and day["l"] <= tp_full)):
+                parts.append((rem, tp_full * (1 - sgn * SLIP), j))
                 rem = 0.0
                 break
             if tp is not None and ((sgn == 1 and day["h"] >= tp) or (sgn == -1 and day["l"] <= tp)):
