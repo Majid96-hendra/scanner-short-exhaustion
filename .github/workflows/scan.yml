@@ -2,7 +2,7 @@ name: Swing Scanner
 
 on:
   schedule:
-    - cron: "5 16 * * *"   # 23:05 WIB, setelah candle harian Bitget close
+    - cron: "5 */4 * * *"   # tiap 4 jam, 5 menit setelah candle 4J close (UTC; 07:05, 11:05, ... WIB)
   workflow_dispatch:        # bisa dijalankan manual dari tab Actions
 
 jobs:
