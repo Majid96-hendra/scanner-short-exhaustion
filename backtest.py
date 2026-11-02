@@ -24,33 +24,57 @@ import common
 import strategy
 from strategy import DEFAULT, Ind, simulate
 
-DATA_FILE = os.getenv("DATA_FILE", "data.json")
+TF = os.getenv("TF", "4H")                      # "4H" = trader harian (cepat), "1D" = swing
+BASE = strategy.PROFILE_4H if TF == "4H" else {}
+BAR_MS = BASE.get("bar_ms", strategy.DAY_MS)
+BT_DAYS = int(os.getenv("BT_DAYS", "720" if TF == "4H" else "1000"))
+DATA_FILE = os.getenv("DATA_FILE", f"data_{TF.lower()}.json")
 TOP_N = int(os.getenv("BT_TOP_N", "100"))  # makin banyak pair = makin banyak trade untuk diuji
 MAX_POS = int(os.getenv("MAX_POS", "2"))
 IS_FRAC = 0.7
 MIN_TRADES = 30
-ENTRIES = [
-    dict(mode="breakout", entry_n=20),
-    dict(mode="breakout", entry_n=55),
-    dict(mode="cross", entry_n=20),   # EMA cepat baru cross di atas EMA lambat
-]
-TPS = [
-    dict(tp_r=0.0, tp_pct=0.0),   # tanpa TP tetap (trailing)
-    dict(tp_r=3.0, tp_pct=0.0),   # TP parsial 3R
-    dict(tp_r=0.0, tp_pct=0.2),   # TP penuh +20% harga
-    dict(tp_r=0.0, tp_pct=0.3),   # TP penuh +30% harga
-]
-GRID = {
-    "exit_n": [10, 20],
-    "ema_n": [100, 200],
-    "atr_stop": [2.0, 3.0],
-    "shorts": [True, False],
-}
+# syarat lolos uji akhir: harian = sedikit trade tapi edge harus besar; 4 jam = banyak trade, edge kecil cukup
+VERIFY = dict(n=30, avg=0.2, pf=1.3) if TF == "1D" else dict(n=150, avg=0.10, pf=1.15)
+if TF == "4H":
+    ENTRIES = [
+        dict(mode="breakout", entry_n=12),   # tembus high 12 candle 4J (~2 hari)
+        dict(mode="breakout", entry_n=24),   # ~4 hari
+        dict(mode="pullback", pb_n=20),      # turun ke EMA20 lalu naik lagi
+        dict(mode="pullback", pb_n=50),
+    ]
+    TPS = [dict(tp_r=1.0), dict(tp_r=1.5), dict(tp_r=2.0)]   # TP penuh (tp_frac=1 dari BASE)
+    GRID = {
+        "atr_stop": [1.5, 2.0],
+        "max_hold": [6, 12],           # keluar paksa setelah 24 jam / 48 jam
+        "btc": [False, True],          # long hanya jika BTC di atas EMA200 (setara harian)
+        "rs_top": [0.0],
+    }
+else:
+    ENTRIES = [
+        dict(mode="breakout", entry_n=20, exit_n=20, ema_n=100, shorts=False),
+    ]
+    TPS = [
+        dict(tp_r=0.0, tp_pct=0.0),   # tanpa TP tetap (trailing)
+        dict(tp_r=3.0, tp_pct=0.0),   # TP parsial 3R
+    ]
+    GRID = {
+        "atr_stop": [2.0, 3.0],
+        "btc": [False, True],          # long hanya jika BTC di atas EMA200
+        "rs_top": [0.0, 0.3, 0.5],     # hanya koin dengan momentum 90 hari top 30% / 50%
+    }
+
+
+def entry_label(e):
+    if e["mode"] == "pullback":
+        return f"Pullback ke EMA{e['pb_n']}"
+    return f"Breakout {e['entry_n']} candle"
 
 
 def tp_label(p):
     if p["tp_pct"] > 0:
         return f"TP penuh +{p['tp_pct'] * 100:.0f}%"
+    if p["tp_r"] > 0 and p["tp_frac"] >= 1.0:
+        return f"TP penuh {p['tp_r']:g}R"
     if p["tp_r"] > 0:
         return f"TP parsial {p['tp_r']:g}R (50%)"
     return "tanpa TP tetap (trailing)"
@@ -59,10 +83,12 @@ def tp_label(p):
 # ---------------------------------------------------------------- data
 def fetch():
     syms = common.universe(TOP_N)
+    if "BTCUSDT" not in syms:
+        syms.append("BTCUSDT")   # dibutuhkan untuk filter pasar
     data, lens, errs = {}, [], []
     for s in syms:
         try:
-            cs, err = common.candles_history(s, "1D", 1000)
+            cs, err = common.candles_history(s, TF, int(BT_DAYS * strategy.DAY_MS / BAR_MS))
             if err:
                 errs.append(err)
             data[s] = [[c["t"], c["o"], c["h"], c["l"], c["c"], c["v"]] for c in cs]
@@ -122,14 +148,26 @@ def stats(tr, days):
 
 
 def describe(p):
+    daily = p["bar_ms"] >= strategy.DAY_MS
+    unit = "hari" if daily else "candle 4J"
     if p["mode"] == "cross":
         entry = f"EMA{p['ema_fast']}/{p['ema_n']} cross baru (≤{p['cross_n']} hari)"
         ema_txt = ""
+    elif p["mode"] == "pullback":
+        entry = f"Pullback ke EMA{p['pb_n']} (4J)"
+        ema_txt = ""
     else:
-        entry = f"Breakout {p['entry_n']} hari"
-        ema_txt = f" • EMA{p['ema_n']}"
-    return (f"{entry}{ema_txt} • trailing {p['exit_n']} hari • "
-            f"SL {p['atr_stop']:g}xATR • short {'ya' if p['shorts'] else 'tidak'} • {tp_label(p)}")
+        entry = f"Breakout {p['entry_n']} {unit}"
+        ema_txt = f" • EMA{p['ema_n']}" if daily else ""
+    ft = ""
+    if p.get("btc"):
+        ft += " • filter BTC>EMA200"
+    if p.get("rs_top", 0) > 0:
+        ft += f" • momentum top {p['rs_top'] * 100:.0f}%"
+    trail_txt = f" • trailing {p['exit_n']} hari" if p["trail"] else ""
+    hold_txt = f" • keluar paksa {p['max_hold'] * p['bar_ms'] // 3600000}j" if p["max_hold"] else ""
+    return (f"{entry}{ema_txt}{trail_txt} • SL {p['atr_stop']:g}xATR • "
+            f"short {'ya' if p['shorts'] else 'tidak'} • {tp_label(p)}{hold_txt}{ft}")
 
 
 def line(tag, s):
@@ -140,24 +178,29 @@ def line(tag, s):
 
 # ---------------------------------------------------------------- inti
 def run(candles):
-    inds = {s: Ind(d) for s, d in candles.items() if len(d) > 260}
+    base_p = {**DEFAULT, **BASE, **ENTRIES[0]}
+    warm = 205 if TF == "1D" else strategy.warmup(base_p) + 4
+    inds = {s: Ind(d) for s, d in candles.items() if len(d) > warm + 60}
     if len(inds) < 5:
         lens = sorted(len(d) for d in candles.values())
         raise SystemExit(
-            "Data terlalu sedikit (butuh minimal 5 pair dengan >260 hari). "
-            f"Pair: {len(lens)}, hari terbanyak: {lens[-1] if lens else 0}. "
+            f"Data terlalu sedikit (butuh minimal 5 pair dengan >{warm + 60} candle). "
+            f"Pair: {len(lens)}, candle terbanyak: {lens[-1] if lens else 0}. "
             "Lihat 'Pesan error pertama' di log fetch.")
     rank = {s: i for i, s in enumerate(inds)}
-    t0 = min(i.d[205]["t"] for i in inds.values())
+    t0 = min(i.d[warm]["t"] for i in inds.values())
     t1 = max(i.d[-1]["t"] for i in inds.values())
     split = t0 + (t1 - t0) * IS_FRAC
     d_is = (split - t0) / strategy.DAY_MS
     d_oos = (t1 - split) / strategy.DAY_MS
 
     mid = t0 + (split - t0) / 2
+    ctx = strategy.build_ctx({s: i.d for s, i in inds.items()}, **strategy.ctx_args(base_p))
+    for ind in inds.values():
+        ind.ctx = ctx
     keys, results = list(GRID), []
     for entry, tp, vals in product(ENTRIES, TPS, product(*GRID.values())):
-        p = {**DEFAULT, **entry, **tp, **dict(zip(keys, vals))}
+        p = {**DEFAULT, **BASE, **entry, **tp, **dict(zip(keys, vals))}
         raw = []
         for s, ind in inds.items():
             raw += simulate(ind, ind.arrays(p), p, s)
@@ -180,14 +223,15 @@ def run(candles):
     pool = stable or ranked
     best = pool[0]
     oos = best["OOS"]
-    verified = oos["n"] >= 15 and oos["avg"] >= 0.1 and oos["pf"] >= 1.2
+    verified = (oos["n"] >= VERIFY["n"] and oos["avg"] >= VERIFY["avg"]
+                and oos["pf"] >= VERIFY["pf"])
     A, B = best["A"], best["B"]
     stab_line = (f"Stabilitas data awal: paruh 1 {A['avg']:+.2f}R ({A['n']}) • "
                  f"paruh 2 {B['avg']:+.2f}R ({B['n']}) " + ("✅" if stable else "⚠️ tidak stabil"))
 
     fmt_d = lambda ms: datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%d")
     rep = [
-        "📊 HASIL BACKTEST SWING HARIAN (Bitget)",
+        f"📊 HASIL BACKTEST {'TRADING 4 JAM' if TF == '4H' else 'SWING HARIAN'} (Bitget)",
         f"{len(inds)} pair • {fmt_d(t0)} s/d {fmt_d(t1)} ({int(d_is + d_oos)} hari)",
         f"Biaya: fee {strategy.FEE*100:.2f}%/sisi, slippage {strategy.SLIP*100:.2f}%/sisi, "
         f"funding {strategy.FUND_DAY*100:.2f}%/hari (long). Maks {MAX_POS} posisi.",
@@ -201,32 +245,48 @@ def run(candles):
         f"Sinyal/hari: mentah {best['raw_day']:.2f} • setelah batas posisi "
         f"{oos['per_day']:.2f} (OOS)",
         f"SL rata-rata {oos['sl']:.1f}% • biaya fee+slippage+funding rata-rata {oos['cost']:.2f}R/trade",
-        f"Estimasi OOS (risiko 1%/trade, tanpa compounding): {oos['tot']:.1f}R ≈ {oos['tot']:.0f}% modal",
+        f"Estimasi OOS (risiko 1%/trade, tanpa compounding): {oos['tot']:.1f}R ≈ {oos['tot']:.0f}% modal "
+        f"≈ {oos['tot'] / d_oos * 365:.0f}%/tahun (target kamu 20-30%)",
         "",
     ]
     if verified:
-        rep.append("✅ LOLOS uji out-of-sample (OOS rata-rata ≥ +0,1R dan PF ≥ 1,2). "
-                   "Bukan jaminan. Mulai dengan ukuran kecil.")
-    elif oos["n"] < 15 and oos["avg"] > 0:
-        rep.append("⚠️ DATA UJI TERLALU SEDIKIT (kurang dari 15 trade). Hasilnya positif tapi "
-                   "belum bisa dipercaya. Uji maju dengan ukuran sangat kecil.")
+        rep.append(f"✅ LOLOS uji out-of-sample (minimal {VERIFY['n']} trade, rata-rata ≥ "
+                   f"+{VERIFY['avg']:.2f}R, PF ≥ {VERIFY['pf']:.2f}). Bukan jaminan. "
+                   "Mulai dengan ukuran kecil.")
+    elif oos["n"] < VERIFY["n"] and oos["avg"] > 0:
+        rep.append(f"⚠️ DATA UJI TERLALU SEDIKIT (kurang dari {VERIFY['n']} trade). Hasilnya positif "
+                   "tapi belum bisa dipercaya. Uji maju dengan ukuran sangat kecil.")
     else:
         rep.append("❌ BELUM LOLOS uji out-of-sample. Jangan live dengan uang besar. "
                    "Hasil bagus di data lama bisa kebetulan.")
-    def best_of(test):
-        c = [r for r in ranked if test(r["p"])]
-        return c[0] if c else None
+    by_key = sorted(results, key=key, reverse=True)   # semua kombinasi, termasuk yang trade-nya sedikit
 
-    rep += ["", "PERBANDINGAN MODE ENTRY (terbaik tiap mode, IS -> OOS):"]
-    for label, test in (("Breakout", lambda p: p["mode"] == "breakout"),
-                        ("EMA cross", lambda p: p["mode"] == "cross")):
+    def best_of(test):
+        c = [r for r in by_key if test(r["p"])]
+        ok = [r for r in c if r["IS"]["n"] >= 10]   # jangan pilih kombinasi yang nyaris tanpa trade
+        return (ok or c or [None])[0]
+
+    rep += ["", "PENGARUH FILTER PASAR (terbaik tiap kombinasi, IS -> OOS):"]
+    for label, test in (
+        ("Tanpa filter", lambda p: not p["btc"] and p["rs_top"] == 0),
+        ("Filter BTC saja", lambda p: p["btc"] and p["rs_top"] == 0),
+        ("Momentum saja", lambda p: not p["btc"] and p["rs_top"] > 0),
+        ("BTC + momentum", lambda p: p["btc"] and p["rs_top"] > 0),
+    ):
         r = best_of(test)
         if r:
             rep.append(f"• {label}: {r['IS']['avg']:+.2f}R ({r['IS']['n']}) -> "
                        f"{r['OOS']['avg']:+.2f}R ({r['OOS']['n']})")
+    if len(ENTRIES) > 1:
+        rep += ["", "PERBANDINGAN ENTRY (terbaik tiap jenis, IS -> OOS):"]
+        for e in ENTRIES:
+            r = best_of(lambda p, e=e: all(p[k] == v for k, v in e.items()))
+            if r:
+                rep.append(f"• {entry_label(e)}: {r['IS']['avg']:+.2f}R ({r['IS']['n']}) -> "
+                           f"{r['OOS']['avg']:+.2f}R ({r['OOS']['n']})")
     rep += ["", "PERBANDINGAN TARGET PROFIT (terbaik tiap jenis, IS -> OOS):"]
     for tp in TPS:
-        r = best_of(lambda p, tp=tp: p["tp_r"] == tp["tp_r"] and p["tp_pct"] == tp["tp_pct"])
+        r = best_of(lambda p, tp=tp: p["tp_r"] == tp["tp_r"] and p["tp_pct"] == tp.get("tp_pct", 0.0))
         if r:
             rep.append(f"• {tp_label(r['p'])}: {r['IS']['avg']:+.2f}R ({r['IS']['n']}) -> "
                        f"{r['OOS']['avg']:+.2f}R ({r['OOS']['n']})")
@@ -246,7 +306,14 @@ def run(candles):
             "updated": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             "oos": {k: round(v, 3) for k, v in oos.items()},
         }, f, indent=2)
-    common.send(text, parse_mode=None)
+    chunk = ""
+    for block in text.split("\n\n"):
+        if chunk and len(chunk) + len(block) > 3500:
+            common.send(chunk, parse_mode=None)
+            chunk = ""
+        chunk += ("\n\n" if chunk else "") + block
+    if chunk:
+        common.send(chunk, parse_mode=None)
     return best, verified
 
 
